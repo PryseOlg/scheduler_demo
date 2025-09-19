@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Scheduler Visualizer — TCP animation</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 12px; background:#f7f7f7; color:#222; }
+  #controls { display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
+  #canvasWrap { border:1px solid #ccc; background:#fff; width:880px; height:600px; position:relative; }
+  canvas { width:100%; height:100%; display:block; }
+  .info { margin-top:8px; }
+  .robotLegend { display:flex; gap:8px; flex-wrap:wrap; margin-top:6px; }
+  .legItem { display:flex; gap:6px; align-items:center; }
+  .colorBox { width:14px; height:14px; border-radius:3px; }
+  #events { max-height:120px; overflow:auto; background:#fff; border:1px solid #ddd; padding:6px; }
+  button, input[type=range], select { padding:6px 8px; }
+  label { font-size:13px; }
+</style>
+</head>
+<body>
+<h2>Visualizer — TCP trajectories</h2>
+
+<div id="controls">
+  <div style="border-bottom: 1px solid #ccc; padding-bottom: 8px; margin-bottom: 8px;">
+    <strong>📁 Загрузка сценариев:</strong><br>
+    <label><input id="scenarioInput" type="file" accept=".txt"> Load scenario file</label>
+    <button id="btnRunScheduler">🚀 Run Scheduler</button>
+    <button id="btnLoadScenarios">📋 Load Examples</button>
+  </div>
+  
+  <div style="border-bottom: 1px solid #ccc; padding-bottom: 8px; margin-bottom: 8px;">
+    <strong>🎬 Визуализация:</strong><br>
+    <label><input id="fileInput" type="file" accept=".txt"> Load schedule file</label>
+    <label>Safe radius (m): <input id="safeInput" type="number" step="0.01" value="0.1" style="width:80px"></label>
+    <button id="btnLoadExample">Load example</button>
+    <button id="playBtn">Play ▶</button>
+    <button id="pauseBtn" disabled>Pause ⏸</button>
+  </div>
+  <label>Speed:
+    <select id="speedSelect">
+      <option value="0.25">0.25x</option>
+      <option value="0.5">0.5x</option>
+      <option value="1" selected>1x</option>
+      <option value="2">2x</option>
+      <option value="4">4x</option>
+    </select>
+  </label>
+  <label>Time: <input id="timeRange" type="range" min="0" max="1000" value="0" style="width:240px"></label>
+  <span id="timeLabel">0 ms</span>
+  <label><input id="showZones" type="checkbox" checked> Show safety zones</label>
+</div>
+
+<div id="canvasWrap"><canvas id="scene"></canvas></div>
+
+<div class="info">
+  <div style="margin-bottom: 12px;">
+    <strong>📊 Информация о планировщике:</strong>
+    <div id="schedulerInfo" style="background:#f0f0f0; padding:6px; margin-top:4px; font-size:12px;">
+      Загрузите сценарий для запуска планировщика
+    </div>
+  </div>
+  
+  <div>Legend:</div>
+  <div class="robotLegend" id="legend"></div>
+  <div style="margin-top:8px;">Events (collisions): <div id="events"></div></div>
+</div>
+
+<script>
+/*
+Visualizer for schedule_output.txt
+Format expected:
+makespan
+R0 m0
+t x y z
+...
+R1 m1
+...
+We animate TCP positions by linear interpolation between waypoints.
+*/
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d');
+const fileInput = document.getElementById('fileInput');
+const safeInput = document.getElementById('safeInput');
+const playBtn = document.getElementById('playBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const timeRange = document.getElementById('timeRange');
+const timeLabel = document.getElementById('timeLabel');
+const speedSelect = document.getElementById('speedSelect');
+const eventsDiv = document.getElementById('events');
+const legendDiv = document.getElementById('legend');
+const showZones = document.getElementById('showZones');
+const btnLoadExample = document.getElementById('btnLoadExample');
+
+// Новые элементы для планировщика
+const scenarioInput = document.getElementById('scenarioInput');
+const btnRunScheduler = document.getElementById('btnRunScheduler');
+const btnLoadScenarios = document.getElementById('btnLoadScenarios');
+const schedulerInfo = document.getElementById('schedulerInfo');
+
+let DPR = window.devicePixelRatio || 1;
+function resizeCanvas(){
+  const wrap = document.getElementById('canvasWrap');
+  canvas.width = wrap.clientWidth * DPR;
+  canvas.height = wrap.clientHeight * DPR;
+  canvas.style.width = wrap.clientWidth + 'px';
+  canvas.style.height = wrap.clientHeight + 'px';
+}
+window.addEventListener('resize', () => { DPR = window.devicePixelRatio || 1; resizeCanvas(); render(); });
+resizeCanvas();
+
+// pan/zoom
+let view = { offsetX:0, offsetY:0, scale:200 }; // scale: pixels per meter
+let dragging=false, lastMouse=null;
+canvas.addEventListener('wheel', (e)=>{ e.preventDefault(); const delta = -e.deltaY; const factor = delta>0?1.1:0.9; view.scale*=factor; render(); });
+canvas.addEventListener('mousedown', (e)=>{ dragging=true; lastMouse={x:e.clientX,y:e.clientY}; });
+window.addEventListener('mouseup', ()=>{ dragging=false; lastMouse=null; });
+window.addEventListener('mousemove', (e)=>{ if(!dragging) return; const dx = e.clientX - lastMouse.x; const dy = e.clientY - lastMouse.y; view.offsetX += dx; view.offsetY += dy; lastMouse={x:e.clientX,y:e.clientY}; render(); });
+
+// coordinate transform
+function toCanvas(pt){ // pt: [x,y] meters -> canvas pixels
+  const cx = canvas.width/2 + (pt[0]*view.scale + view.offsetX)*DPR;
+  const cy = canvas.height/2 - (pt[1]*view.scale + view.offsetY)*DPR;
+  return [cx, cy];
+}
+
+// parse file content
+function parseSchedule(text){
+  const lines = text.split(/\r?\n/).map(s=>s.trim()).filter(s=>s!=='');
+  if(lines.length===0) return null;
+  let idx=0;
+  const makespan = parseFloat(lines[idx++]);
+  const robots = {};
+  while(idx < lines.length){
+    const header = lines[idx++].split(/\s+/);
+    if(header.length<2) break;
+    const ridStr = header[0]; const m = parseInt(header[1]);
+    const rid = parseInt(ridStr.replace(/^R/i,''));
+    robots[rid] = [];
+    for(let i=0;i<m;i++){
+      if(idx>=lines.length) break;
+      const parts = lines[idx++].split(/\s+/);
+      const t = parseFloat(parts[0]);
+      const x = parseFloat(parts[1]);
+      const y = parseFloat(parts[2]);
+      const z = parseFloat(parts[3]);
+      robots[rid].push({t,tms:t,x,y,z, p:[x,y,z]});
+    }
+  }
+  return { makespan, robots };
+}
+
+// linear interpolation
+function interpPosition(path, t){
+  if(!path || path.length===0) return [0, 0, 0]; // return default position instead of null
+  if(t <= path[0].t) return path[0].p;
+  if(t >= path[path.length-1].t) return path[path.length-1].p;
+  for(let i=0;i<path.length-1;i++){
+    const a=path[i], b=path[i+1];
+    if(t>=a.t && t<=b.t){
+      const alpha = (t - a.t) / (b.t - a.t);
+      return [ a.p[0] + (b.p[0]-a.p[0])*alpha,
+               a.p[1] + (b.p[1]-a.p[1])*alpha,
+               a.p[2] + (b.p[2]-a.p[2])*alpha ];
+    }
+  }
+  return path[path.length-1].p;
+}
+
+// collision detection at a given time for current positions
+function pairwiseCollisions(state, safeRadius){
+  const events = [];
+  const ids = Object.keys(state).map(k=>parseInt(k));
+  for(let i=0;i<ids.length;i++){
+    for(let j=i+1;j<ids.length;j++){
+      const a = state[ids[i]], b = state[ids[j]];
+      const dx = a[0]-b[0], dy = a[1]-b[1], dz = a[2]-b[2];
+      const d = Math.hypot(dx,dy,dz);
+      if(d < safeRadius - 1e-9){
+        events.push({a:ids[i], b:ids[j], dist:d});
+      }
+    }
+  }
+  return events;
+}
+
+// analytic segment distance (for reporting collisions along whole timeline)
+// We'll use simple dense sampling for simplicity in this visualizer, but also a short analytic minimization function per segment pair would be doable.
+// For now we will produce per-time collisions via sampling while animating.
+function computeAllPairsMinDistances(schedule, sampleStepMs=50){
+  const robots = Object.keys(schedule.robots).map(k=>parseInt(k));
+  const maxT = schedule.meta.makespan;
+  const events = [];
+  for(let t=0; t<=maxT; t+=sampleStepMs){
+    const state = {};
+    for(const r of robots){
+      if(schedule.robots[r]) {
+        state[r] = interpPosition(schedule.robots[r], t);
+      }
+    }
+    const cols = pairwiseCollisions(state, (parseFloat(safeInput.value) + 0.0));
+    for(const c of cols){
+      events.push({t, a:c.a, b:c.b, d:c.dist});
+    }
+  }
+  return events;
+}
+
+// rendering
+let schedule = null;
+let playing = false;
+let currentTime = 0;
+let lastTs = 0;
+let playReqId = null;
+const colors = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f'];
+
+function render(){
+  // clear
+  ctx.clearRect(0,0,canvas.width, canvas.height);
+  ctx.save();
+  ctx.scale(DPR,DPR);
+
+  // draw grid
+  const step = 0.1 * view.scale; // 0.1 m grid
+  ctx.strokeStyle = '#eee';
+  ctx.lineWidth = 1;
+  for(let x=0; x<canvas.width/DPR; x+=step){
+    ctx.beginPath();
+    ctx.moveTo(x + (view.offsetX % step), 0);
+    ctx.lineTo(x + (view.offsetX % step), canvas.height/DPR);
+    ctx.stroke();
+  }
+
+  if(!schedule) { ctx.restore(); return; }
+
+  // compute current positions
+  const state = {};
+  for(const ridStr of Object.keys(schedule.robots)){
+    const rid = parseInt(ridStr);
+    const path = schedule.robots[rid];
+    if(path && path.length > 0) { // only include robots with waypoints
+      const pos = interpPosition(path, currentTime);
+      state[rid] = pos;
+    }
+  }
+
+  // draw paths (static)
+  for(const ridStr of Object.keys(schedule.robots)){
+    const rid = parseInt(ridStr);
+    const path = schedule.robots[rid];
+    if(!path || path.length === 0) continue; // skip robots with no waypoints
+    
+    ctx.beginPath();
+    const c = colors[rid % colors.length];
+    ctx.strokeStyle = c;
+    ctx.lineWidth = 2;
+    for(let i=0;i<path.length;i++){
+      const p = toCanvas([path[i].p[0], path[i].p[1]]);
+      if(i===0) ctx.moveTo(p[0], p[1]);
+      else ctx.lineTo(p[0], p[1]);
+    }
+    ctx.stroke();
+    // draw waypoints
+    for(let i=0;i<path.length;i++){
+      const p = toCanvas([path[i].p[0], path[i].p[1]]);
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = c;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 5, 0, Math.PI*2);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  // draw safety zones
+  if(showZones.checked){
+    for(const ridStr of Object.keys(schedule.robots)){
+      const rid = parseInt(ridStr);
+      const path = schedule.robots[rid];
+      if(!path || path.length === 0) continue; // skip robots with no waypoints
+      const pos = state[rid];
+      if(!pos) continue;
+      const [cx,cy] = toCanvas([pos[0], pos[1]]);
+      const safeR = (parseFloat(schedule.meta.tool_clearance) + parseFloat(schedule.meta.safe_dist)) * view.scale;
+      ctx.beginPath();
+      ctx.fillStyle = hexToRgba(colors[rid % colors.length], 0.12);
+      ctx.strokeStyle = hexToRgba(colors[rid % colors.length], 0.7);
+      ctx.lineWidth = 1;
+      ctx.arc(cx, cy, safeR*DPR, 0, Math.PI*2);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  // draw robots (TCP)
+  for(const ridStr of Object.keys(schedule.robots)){
+    const rid = parseInt(ridStr);
+    const path = schedule.robots[rid];
+    if(!path || path.length === 0) continue; // skip robots with no waypoints
+    const pos = state[rid];
+    if(!pos) continue;
+    const [cx,cy] = toCanvas([pos[0], pos[1]]);
+    ctx.beginPath();
+    ctx.fillStyle = colors[rid % colors.length];
+    ctx.strokeStyle = '#222';
+    ctx.lineWidth = 1;
+    ctx.arc(cx, cy, 6, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+
+    // label
+    ctx.fillStyle = '#000';
+    ctx.font = '13px sans-serif';
+    ctx.fillText('R'+rid + ` z=${pos[2].toFixed(3)}m`, cx+8, cy-8);
+  }
+
+  ctx.restore();
+}
+
+function hexToRgba(hex, alpha){
+  const h = hex.replace('#','');
+  const r = parseInt(h.substring(0,2),16), g=parseInt(h.substring(2,4),16), b=parseInt(h.substring(4,6),16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// animation loop
+function animateStep(ts){
+  if(!lastTs) lastTs = ts;
+  const dt = ts - lastTs; lastTs = ts;
+  const speed = parseFloat(speedSelect.value);
+  if(playing){
+    currentTime += dt * speed;
+    if(currentTime > schedule.meta.makespan) { currentTime = schedule.meta.makespan; stopPlaying(); }
+    timeRange.value = Math.round((currentTime / schedule.meta.makespan) * 1000);
+    timeLabel.textContent = `${Math.round(currentTime)} ms`;
+    // compute collisions at this time
+    const state = {};
+    for(const ridStr of Object.keys(schedule.robots)){
+      const rid = parseInt(ridStr);
+      const path = schedule.robots[rid];
+      if(path && path.length > 0) { // only include robots with waypoints
+        state[rid] = interpPosition(path, currentTime);
+      }
+    }
+    const cols = pairwiseCollisions(state, parseFloat(schedule.meta.tool_clearance) + parseFloat(schedule.meta.safe_dist));
+    eventsDiv.innerHTML = cols.length ? cols.map(c=>`t=${Math.round(currentTime)}ms: R${c.a} ↔ R${c.b} dist=${c.dist.toFixed(3)}m`).join('<br>') : '—';
+  }
+  render();
+  playReqId = requestAnimationFrame(animateStep);
+}
+
+function startPlaying(){
+  if(!schedule) return;
+  playing = true; playBtn.disabled = true; pauseBtn.disabled = false; lastTs = 0;
+  playReqId = requestAnimationFrame(animateStep);
+}
+function stopPlaying(){
+  playing = false; playBtn.disabled = false; pauseBtn.disabled = true;
+  if(playReqId){ cancelAnimationFrame(playReqId); playReqId = null; }
+}
+
+// handle file load
+fileInput.addEventListener('change', (ev)=>{
+  const f = ev.target.files[0]; if(!f) return;
+  const reader = new FileReader();
+  reader.onload = function(e){
+    try { loadScheduleFromText(e.target.result); }
+    catch(err){ alert('Parse error: '+err.message); console.error(err); }
+  };
+  reader.readAsText(f);
+});
+
+btnLoadExample.addEventListener('click', ()=>{
+  // a small example to test
+  const sample = `2000
+R0 2
+0 1.000 0.000 0.000
+1000 1.000 0.500 0.000
+R1 4
+0 0.000 0.000 0.000
+1000 0.500 0.000 0.000
+1000 0.500 0.500 0.000
+2000 0.000 0.500 0.000
+`;
+  loadScheduleFromText(sample);
+});
+
+timeRange.addEventListener('input', ()=>{
+  if(!schedule) return;
+  const pct = parseFloat(timeRange.value)/1000.0;
+  currentTime = pct * schedule.meta.makespan;
+  timeLabel.textContent = `${Math.round(currentTime)} ms`;
+  render();
+});
+
+playBtn.addEventListener('click', ()=> startPlaying());
+pauseBtn.addEventListener('click', ()=> stopPlaying());
+
+// load & prepare schedule
+function loadScheduleFromText(txt){
+  const parsed = parseSchedule(txt);
+  if(!parsed) throw new Error('empty or invalid file');
+  // try to detect tool_clearance/safe_dist if present in meta lines (not in current output format)
+  // We'll allow user to set safe radius manually via input; also attach default meta
+  parsed.meta = parsed.meta || {};
+  parsed.meta.makespan = parsed.makespan;
+  parsed.meta.tool_clearance = (typeof parsed.meta.tool_clearance !== 'undefined') ? parsed.meta.tool_clearance : 0.05;
+  parsed.meta.safe_dist = (typeof parsed.meta.safe_dist !== 'undefined') ? parsed.meta.safe_dist : parseFloat(safeInput.value || 0.1);
+  // convert robots points to [{t, p:[x,y,z]}]
+  for(const rid of Object.keys(parsed.robots)){
+    parsed.robots[rid] = parsed.robots[rid].map(o => ({ t: o.t, p: [o.x, o.y, o.z] }));
+  }
+  schedule = parsed;
+  timeRange.min = 0;
+  timeRange.max = 1000;
+  timeRange.value = 0;
+  currentTime = 0;
+  timeLabel.textContent = `0 ms`;
+  // build legend
+  legendDiv.innerHTML = '';
+  for(const ridStr of Object.keys(schedule.robots)){
+    const rid = parseInt(ridStr);
+    const el = document.createElement('div'); el.className = 'legItem';
+    const box = document.createElement('div'); box.className='colorBox'; box.style.background = colors[rid % colors.length];
+    el.appendChild(box);
+    const robotPath = schedule.robots[rid];
+    const waypointCount = robotPath ? robotPath.length : 0;
+    const txt = document.createElement('div'); txt.textContent = `Robot ${rid} (${waypointCount} waypoints)`;
+    el.appendChild(txt);
+    legendDiv.appendChild(el);
+  }
+  // precompute rough collisions (sampling)
+  const evs = computeAllPairsMinDistances(parsed, 100);
+  eventsDiv.innerHTML = evs.length ? evs.slice(0,200).map(e=>`t≈${e.t}ms: R${e.a}↔R${e.b} d=${e.d.toFixed(3)}m`).join('<br>') : '—';
+  render();
+}
+
+// === Функции для работы с планировщиком ===
+
+let currentScenarioFile = null;
+
+// Функция для запуска планировщика через API
+async function runScheduler(scenarioContent) {
+  schedulerInfo.innerHTML = '⏳ Запуск планировщика...';
+  
+  try {
+    // Отправляем запрос к серверу планировщика
+    const response = await fetch('/api/run_scheduler', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        scenario: scenarioContent
+      })
+    });
+    
+    const result = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(result.error || 'Неизвестная ошибка сервера');
+    }
+    
+    schedulerInfo.innerHTML = `
+      ✅ Планировщик завершен<br>
+      Makespan: ${result.makespan} мс<br>
+      Роботов: ${result.num_robots}<br>
+      ${result.output ? `<br>Лог:<br><pre style="font-size:10px; margin:0;">${result.output}</pre>` : ''}
+    `;
+    
+    // Автоматически загружаем результат в визуализатор
+    loadScheduleFromText(result.schedule);
+    
+  } catch (error) {
+    schedulerInfo.innerHTML = `❌ Ошибка планировщика: ${error.message}`;
+    console.error('Ошибка планировщика:', error);
+  }
+}
+
+// Генерация демо-расписания на основе сценария
+function generateDemoSchedule(scenarioContent) {
+  const lines = scenarioContent.split('\n').filter(l => l.trim());
+  const [K, N] = lines[0].split(' ').map(Number);
+  
+  // Простая генерация демо-расписания
+  const makespan = 5000 + Math.random() * 3000;
+  let scheduleContent = `${Math.floor(makespan)}\n`;
+  
+  for (let r = 0; r < K; r++) {
+    const numWaypoints = Math.floor(Math.random() * 6) + 2;
+    scheduleContent += `R${r} ${numWaypoints}\n`;
+    
+    for (let w = 0; w < numWaypoints; w++) {
+      const time = Math.floor((w / (numWaypoints - 1)) * makespan);
+      const x = (Math.random() - 0.5) * 2;
+      const y = (Math.random() - 0.5) * 2;
+      const z = 0.1 + Math.random() * 0.2;
+      scheduleContent += `${time} ${x.toFixed(3)} ${y.toFixed(3)} ${z.toFixed(3)}\n`;
+    }
+  }
+  
+  return {
+    makespan: Math.floor(makespan),
+    numRobots: K,
+    numOperations: N,
+    scheduleContent: scheduleContent
+  };
+}
+
+// Обработчики событий для новых элементов
+scenarioInput.addEventListener('change', (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    currentScenarioFile = e.target.result;
+    schedulerInfo.innerHTML = `📁 Загружен сценарий: ${file.name}`;
+  };
+  reader.readAsText(file);
+});
+
+btnRunScheduler.addEventListener('click', () => {
+  if (!currentScenarioFile) {
+    schedulerInfo.innerHTML = '❌ Сначала загрузите файл сценария';
+    return;
+  }
+  runScheduler(currentScenarioFile);
+});
+
+btnLoadScenarios.addEventListener('click', async () => {
+  try {
+    schedulerInfo.innerHTML = '⏳ Загрузка примеров...';
+    
+    // Загружаем список сценариев с сервера
+    const response = await fetch('/api/scenarios');
+    const data = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(data.error || 'Ошибка загрузки сценариев');
+    }
+    
+    const scenarios = data.scenarios;
+    if (scenarios.length === 0) {
+      schedulerInfo.innerHTML = '❌ Нет доступных сценариев';
+      return;
+    }
+    
+    // Показываем список доступных сценариев
+    const scenarioNames = scenarios.map(s => s.name);
+    const selectedScenario = prompt(`Выберите сценарий:\n${scenarioNames.map((name, i) => `${i + 1}. ${name}`).join('\n')}`);
+    
+    if (selectedScenario) {
+      const index = parseInt(selectedScenario) - 1;
+      if (index >= 0 && index < scenarios.length) {
+        const scenario = scenarios[index];
+        currentScenarioFile = scenario.content;
+        schedulerInfo.innerHTML = `📋 Загружен пример: ${scenario.name}`;
+      }
+    } else {
+      schedulerInfo.innerHTML = 'Отменено';
+    }
+    
+  } catch (error) {
+    schedulerInfo.innerHTML = `❌ Ошибка загрузки: ${error.message}`;
+    console.error('Ошибка загрузки сценариев:', error);
+  }
+});
+
+// initial render
+render();
+
+</script>
+</body>
+</html>
