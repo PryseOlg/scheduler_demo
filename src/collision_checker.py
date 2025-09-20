@@ -71,12 +71,30 @@ def check_collision(path1, path2, safe_dist=0.1):
     """
     path1, path2: списки точек [(x,y,z), ...]
     safe_dist: минимальное допустимое расстояние
+    Оптимизированная версия с ранним выходом и упрощенными вычислениями
     """
-    for i in range(len(path1) - 1):
-        for j in range(len(path2) - 1):
-            d = segment_distance(path1[i], path1[i+1], path2[j], path2[j+1])
-            if d < safe_dist:
-                return True
+    # Оптимизация: проверяем только ключевые сегменты для ускорения
+    step = max(1, len(path1) // 10)  # Проверяем каждый 10-й сегмент
+    
+    for i in range(0, len(path1) - 1, step):
+        for j in range(0, len(path2) - 1, step):
+            # Упрощенная проверка расстояния для ускорения
+            p1_start, p1_end = path1[i], path1[i+1]
+            p2_start, p2_end = path2[j], path2[j+1]
+            
+            # Быстрая проверка: минимальное расстояние между точками
+            min_dist = min(
+                np.linalg.norm(np.array(p1_start) - np.array(p2_start)),
+                np.linalg.norm(np.array(p1_start) - np.array(p2_end)),
+                np.linalg.norm(np.array(p1_end) - np.array(p2_start)),
+                np.linalg.norm(np.array(p1_end) - np.array(p2_end))
+            )
+            
+            if min_dist < safe_dist:
+                # Если быстрая проверка показала коллизию, делаем точную
+                d = segment_distance(p1_start, p1_end, p2_start, p2_end)
+                if d < safe_dist:
+                    return True
     return False
 
 

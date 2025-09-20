@@ -1,0 +1,5 @@
+numpy>=1.21.0
+ortools>=9.0.0
+flask>=2.0.0
+flask-cors>=3.0.0
+matplotlib>=3.5.0

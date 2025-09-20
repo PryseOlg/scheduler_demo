@@ -1,0 +1,36 @@
+# Exclude ROS2 workspace
+ros2_ws/
+
+# Exclude Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Exclude virtual environments
+venv/
+env/
+ENV/
+
+# Exclude IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Exclude OS files
+.DS_Store
+Thumbs.db
+
+# Exclude git
+.git/
+.gitignore
+
+# Exclude output files
+*.txt
+!requirements.txt
+!README.txt
+
+# Exclude logs
+*.log

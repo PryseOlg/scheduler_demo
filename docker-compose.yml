@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  scheduler:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      # Mount scenarios directory for easy access to test files
+      - ./scenarios:/app/scenarios:ro
+      # Mount output directory for results
+      - ./output:/app/output
+    environment:
+      - FLASK_ENV=development
+      - PYTHONPATH=/app/src
+    command: python -m flask run --host=0.0.0.0 --port=5000
+
+  # Alternative service for running scheduler directly
+  scheduler-cli:
+    build: .
+    volumes:
+      - ./scenarios:/app/scenarios:ro
+      - ./output:/app/output
+    environment:
+      - PYTHONPATH=/app/src
+    command: python src/scheduler_integrated.py scenarios/triangle_test.txt output/triangle_result.txt
+    profiles:
+      - cli
