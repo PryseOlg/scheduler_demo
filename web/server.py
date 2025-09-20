@@ -51,8 +51,9 @@ def run_scheduler():
             ], capture_output=True, text=True, timeout=30)
             
             if result.returncode != 0:
+                error_msg = result.stderr.strip() if result.stderr.strip() else "Неизвестная ошибка планировщика"
                 return jsonify({
-                    'error': f'Ошибка планировщика: {result.stderr}',
+                    'error': f'Ошибка планировщика: {error_msg}',
                     'stdout': result.stdout
                 }), 500
             
@@ -67,12 +68,31 @@ def run_scheduler():
             # Подсчитываем количество роботов и операций
             num_robots = len([line for line in lines if line.startswith('R')])
             
+            # Парсим входной файл для получения метаданных
+            try:
+                from parser import parse_input
+                temp_problem = parse_input(input_file_path)
+                metadata = {
+                    'tool_clearance': temp_problem.tool_clearance,
+                    'safe_dist': temp_problem.safe_dist,
+                    'robot_positions': temp_problem.robot_positions
+                }
+            except:
+                metadata = {
+                    'tool_clearance': 0.05,
+                    'safe_dist': 0.1,
+                    'robot_positions': []
+                }
+            
             return jsonify({
                 'success': True,
                 'makespan': makespan,
                 'schedule': schedule_content,
                 'num_robots': num_robots,
-                'output': result.stdout
+                'output': result.stdout,
+                'tool_clearance': metadata['tool_clearance'],
+                'safe_dist': metadata['safe_dist'],
+                'robot_positions': metadata['robot_positions']
             })
             
         finally:

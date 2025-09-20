@@ -124,29 +124,50 @@ function toCanvas(pt){ // pt: [x,y] meters -> canvas pixels
 }
 
 // parse file content
-function parseSchedule(text){
-  const lines = text.split(/\r?\n/).map(s=>s.trim()).filter(s=>s!=='');
-  if(lines.length===0) return null;
-  let idx=0;
+function parseSchedule(text, metadata = {}) {
+  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(s => s !== '');
+  if (lines.length === 0) return null;
+  
+  let idx = 0;
   const makespan = parseFloat(lines[idx++]);
   const robots = {};
-  while(idx < lines.length){
+  
+  while (idx < lines.length) {
     const header = lines[idx++].split(/\s+/);
-    if(header.length<2) break;
-    const ridStr = header[0]; const m = parseInt(header[1]);
-    const rid = parseInt(ridStr.replace(/^R/i,''));
+    if (header.length < 2) break;
+    
+    const ridStr = header[0];
+    const m = parseInt(header[1]);
+    const rid = parseInt(ridStr.replace(/^R/i, ''));
+    
     robots[rid] = [];
-    for(let i=0;i<m;i++){
-      if(idx>=lines.length) break;
+    for (let i = 0; i < m; i++) {
+      if (idx >= lines.length) break;
+      
       const parts = lines[idx++].split(/\s+/);
       const t = parseFloat(parts[0]);
       const x = parseFloat(parts[1]);
       const y = parseFloat(parts[2]);
       const z = parseFloat(parts[3]);
-      robots[rid].push({t,tms:t,x,y,z, p:[x,y,z]});
+      
+      robots[rid].push({
+        t, tms: t, x, y, z,
+        p: [x, y, z]
+      });
     }
   }
-  return { makespan, robots };
+  
+  // Добавляем метаданные из планировщика
+  return {
+    makespan,
+    robots,
+    meta: {
+      makespan,
+      tool_clearance: metadata.tool_clearance || 0.05,
+      safe_dist: metadata.safe_dist || 0.1,
+      robot_positions: metadata.robot_positions || [] // позиции оснований роботов
+    }
+  };
 }
 
 // linear interpolation
@@ -213,105 +234,138 @@ let lastTs = 0;
 let playReqId = null;
 const colors = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f'];
 
-function render(){
+function render() {
   // clear
-  ctx.clearRect(0,0,canvas.width, canvas.height);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.save();
-  ctx.scale(DPR,DPR);
+  ctx.scale(DPR, DPR);
 
   // draw grid
   const step = 0.1 * view.scale; // 0.1 m grid
   ctx.strokeStyle = '#eee';
   ctx.lineWidth = 1;
-  for(let x=0; x<canvas.width/DPR; x+=step){
+  for (let x = 0; x < canvas.width / DPR; x += step) {
     ctx.beginPath();
     ctx.moveTo(x + (view.offsetX % step), 0);
-    ctx.lineTo(x + (view.offsetX % step), canvas.height/DPR);
+    ctx.lineTo(x + (view.offsetX % step), canvas.height / DPR);
+    ctx.stroke();
+  }
+  for (let y = 0; y < canvas.height / DPR; y += step) {
+    ctx.beginPath();
+    ctx.moveTo(0, y + (view.offsetY % step));
+    ctx.lineTo(canvas.width / DPR, y + (view.offsetY % step));
     ctx.stroke();
   }
 
-  if(!schedule) { ctx.restore(); return; }
+  // Рисуем основания роботов (НОВОЕ)
+  if (schedule && schedule.meta && schedule.meta.robot_positions && schedule.meta.robot_positions.length > 0) {
+    for (let i = 0; i < schedule.meta.robot_positions.length; i++) {
+      const basePos = schedule.meta.robot_positions[i];
+      if (basePos) {
+        const [cx, cy] = toCanvas([basePos[0], basePos[1]]);
+        
+        // Рисуем основание робота
+        ctx.beginPath();
+        ctx.fillStyle = hexToRgba(colors[i % colors.length], 0.7);
+        ctx.strokeStyle = '#222';
+        ctx.lineWidth = 2;
+        ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        
+        // Подпись основания
+        ctx.fillStyle = '#000';
+        ctx.font = '12px sans-serif';
+        ctx.fillText(`Base R${i}`, cx + 12, cy + 5);
+      }
+    }
+  }
+
+  if (!schedule) {
+    ctx.restore();
+    return;
+  }
 
   // compute current positions
   const state = {};
-  for(const ridStr of Object.keys(schedule.robots)){
+  for (const ridStr of Object.keys(schedule.robots)) {
     const rid = parseInt(ridStr);
     const path = schedule.robots[rid];
-    if(path && path.length > 0) { // only include robots with waypoints
+    if (path && path.length > 0) { // only include robots with waypoints
       const pos = interpPosition(path, currentTime);
       state[rid] = pos;
     }
   }
 
   // draw paths (static)
-  for(const ridStr of Object.keys(schedule.robots)){
+  for (const ridStr of Object.keys(schedule.robots)) {
     const rid = parseInt(ridStr);
     const path = schedule.robots[rid];
-    if(!path || path.length === 0) continue; // skip robots with no waypoints
+    if (!path || path.length === 0) continue; // skip robots with no waypoints
     
     ctx.beginPath();
     const c = colors[rid % colors.length];
     ctx.strokeStyle = c;
     ctx.lineWidth = 2;
-    for(let i=0;i<path.length;i++){
+    for (let i = 0; i < path.length; i++) {
       const p = toCanvas([path[i].p[0], path[i].p[1]]);
-      if(i===0) ctx.moveTo(p[0], p[1]);
+      if (i === 0) ctx.moveTo(p[0], p[1]);
       else ctx.lineTo(p[0], p[1]);
     }
     ctx.stroke();
     // draw waypoints
-    for(let i=0;i<path.length;i++){
+    for (let i = 0; i < path.length; i++) {
       const p = toCanvas([path[i].p[0], path[i].p[1]]);
       ctx.fillStyle = '#fff';
       ctx.strokeStyle = c;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(p[0], p[1], 5, 0, Math.PI*2);
+      ctx.arc(p[0], p[1], 5, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     }
   }
 
   // draw safety zones
-  if(showZones.checked){
-    for(const ridStr of Object.keys(schedule.robots)){
+  if (showZones.checked) {
+    for (const ridStr of Object.keys(schedule.robots)) {
       const rid = parseInt(ridStr);
       const path = schedule.robots[rid];
-      if(!path || path.length === 0) continue; // skip robots with no waypoints
+      if (!path || path.length === 0) continue; // skip robots with no waypoints
       const pos = state[rid];
-      if(!pos) continue;
-      const [cx,cy] = toCanvas([pos[0], pos[1]]);
+      if (!pos) continue;
+      const [cx, cy] = toCanvas([pos[0], pos[1]]);
       const safeR = (parseFloat(schedule.meta.tool_clearance) + parseFloat(schedule.meta.safe_dist)) * view.scale;
       ctx.beginPath();
       ctx.fillStyle = hexToRgba(colors[rid % colors.length], 0.12);
       ctx.strokeStyle = hexToRgba(colors[rid % colors.length], 0.7);
       ctx.lineWidth = 1;
-      ctx.arc(cx, cy, safeR*DPR, 0, Math.PI*2);
+      ctx.arc(cx, cy, safeR * DPR, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     }
   }
 
   // draw robots (TCP)
-  for(const ridStr of Object.keys(schedule.robots)){
+  for (const ridStr of Object.keys(schedule.robots)) {
     const rid = parseInt(ridStr);
     const path = schedule.robots[rid];
-    if(!path || path.length === 0) continue; // skip robots with no waypoints
+    if (!path || path.length === 0) continue; // skip robots with no waypoints
     const pos = state[rid];
-    if(!pos) continue;
-    const [cx,cy] = toCanvas([pos[0], pos[1]]);
+    if (!pos) continue;
+    const [cx, cy] = toCanvas([pos[0], pos[1]]);
     ctx.beginPath();
     ctx.fillStyle = colors[rid % colors.length];
     ctx.strokeStyle = '#222';
     ctx.lineWidth = 1;
-    ctx.arc(cx, cy, 6, 0, Math.PI*2);
+    ctx.arc(cx, cy, 6, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
 
     // label
     ctx.fillStyle = '#000';
     ctx.font = '13px sans-serif';
-    ctx.fillText('R'+rid + ` z=${pos[2].toFixed(3)}m`, cx+8, cy-8);
+    ctx.fillText('R' + rid + ` z=${pos[2].toFixed(3)}m`, cx + 8, cy - 8);
   }
 
   ctx.restore();
@@ -397,41 +451,56 @@ playBtn.addEventListener('click', ()=> startPlaying());
 pauseBtn.addEventListener('click', ()=> stopPlaying());
 
 // load & prepare schedule
-function loadScheduleFromText(txt){
-  const parsed = parseSchedule(txt);
-  if(!parsed) throw new Error('empty or invalid file');
-  // try to detect tool_clearance/safe_dist if present in meta lines (not in current output format)
-  // We'll allow user to set safe radius manually via input; also attach default meta
-  parsed.meta = parsed.meta || {};
-  parsed.meta.makespan = parsed.makespan;
-  parsed.meta.tool_clearance = (typeof parsed.meta.tool_clearance !== 'undefined') ? parsed.meta.tool_clearance : 0.05;
-  parsed.meta.safe_dist = (typeof parsed.meta.safe_dist !== 'undefined') ? parsed.meta.safe_dist : parseFloat(safeInput.value || 0.1);
-  // convert robots points to [{t, p:[x,y,z]}]
-  for(const rid of Object.keys(parsed.robots)){
-    parsed.robots[rid] = parsed.robots[rid].map(o => ({ t: o.t, p: [o.x, o.y, o.z] }));
+function loadScheduleFromText(txt, metadata = {}) {
+  const parsed = parseSchedule(txt, metadata);
+  if (!parsed) throw new Error('empty or invalid file');
+
+  // Конвертируем точки траектории
+  for (const rid of Object.keys(parsed.robots)) {
+    parsed.robots[rid] = parsed.robots[rid].map(o => ({
+      t: o.t,
+      p: [o.x, o.y, o.z]
+    }));
   }
+  
   schedule = parsed;
   timeRange.min = 0;
   timeRange.max = 1000;
   timeRange.value = 0;
   currentTime = 0;
   timeLabel.textContent = `0 ms`;
-  // build legend
+  
+  // Обновляем легенду с учетом позиций роботов
   legendDiv.innerHTML = '';
-  for(const ridStr of Object.keys(schedule.robots)){
+  for (const ridStr of Object.keys(schedule.robots)) {
     const rid = parseInt(ridStr);
-    const el = document.createElement('div'); el.className = 'legItem';
-    const box = document.createElement('div'); box.className='colorBox'; box.style.background = colors[rid % colors.length];
+    const el = document.createElement('div');
+    el.className = 'legItem';
+    
+    const box = document.createElement('div');
+    box.className = 'colorBox';
+    box.style.background = colors[rid % colors.length];
     el.appendChild(box);
+    
     const robotPath = schedule.robots[rid];
     const waypointCount = robotPath ? robotPath.length : 0;
-    const txt = document.createElement('div'); txt.textContent = `Robot ${rid} (${waypointCount} waypoints)`;
+    
+    const txt = document.createElement('div');
+    // Добавляем информацию о позиции основания, если доступна
+    const basePos = schedule.meta.robot_positions && schedule.meta.robot_positions[rid];
+    const posInfo = basePos ? ` (Base: ${basePos[0].toFixed(1)}, ${basePos[1].toFixed(1)}, ${basePos[2].toFixed(1)})` : '';
+    txt.textContent = `Robot ${rid} (${waypointCount} waypoints)${posInfo}`;
+    
     el.appendChild(txt);
     legendDiv.appendChild(el);
   }
-  // precompute rough collisions (sampling)
+  
+  // Предварительный расчет коллизий
   const evs = computeAllPairsMinDistances(parsed, 100);
-  eventsDiv.innerHTML = evs.length ? evs.slice(0,200).map(e=>`t≈${e.t}ms: R${e.a}↔R${e.b} d=${e.d.toFixed(3)}m`).join('<br>') : '—';
+  eventsDiv.innerHTML = evs.length ? 
+    evs.slice(0, 200).map(e => `t≈${e.t}ms: R${e.a}↔R${e.b} d=${e.d.toFixed(3)}m`).join('<br>') : 
+    '—';
+  
   render();
 }
 
@@ -444,7 +513,6 @@ async function runScheduler(scenarioContent) {
   schedulerInfo.innerHTML = '⏳ Запуск планировщика...';
   
   try {
-    // Отправляем запрос к серверу планировщика
     const response = await fetch('/api/run_scheduler', {
       method: 'POST',
       headers: {
@@ -468,8 +536,12 @@ async function runScheduler(scenarioContent) {
       ${result.output ? `<br>Лог:<br><pre style="font-size:10px; margin:0;">${result.output}</pre>` : ''}
     `;
     
-    // Автоматически загружаем результат в визуализатор
-    loadScheduleFromText(result.schedule);
+    // Передаем метаданные в визуализатор
+    loadScheduleFromText(result.schedule, {
+      tool_clearance: result.tool_clearance,
+      safe_dist: result.safe_dist,
+      robot_positions: result.robot_positions
+    });
     
   } catch (error) {
     schedulerInfo.innerHTML = `❌ Ошибка планировщика: ${error.message}`;
