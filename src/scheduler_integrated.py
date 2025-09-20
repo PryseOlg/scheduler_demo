@@ -387,9 +387,18 @@ def main():
                 frames.append((time, point[0], point[1], point[2]))
             schedules[robot_id] = frames
         
-        # Сохраняем результат
+        # Вычисляем реальный makespan из траекторий
+        real_makespan = 0
+        for robot_id, waypoints in robot_paths.items():
+            if waypoints:
+                last_time = waypoints[-1][0]  # Время последнего waypoint
+                real_makespan = max(real_makespan, last_time)
+        
+        print(f"\n📊 Реальное время завершения: {real_makespan} мс (vs модель: {makespan} мс)")
+        
+        # Сохраняем результат с реальным makespan
         print(f"\n💾 Сохраняем результат в {output_file}")
-        dump_output(makespan, schedules, output_file)
+        dump_output(real_makespan, schedules, output_file)
         
         print("✅ Готово!")
         
